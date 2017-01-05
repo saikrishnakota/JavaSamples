@@ -2,7 +2,8 @@ package com.myjava.string;
 
 import java.util.Scanner;
 //This is to print the fibonacci series value that is less than n value
-// This is the example for mix of Recursion and iterative
+/* This is the example for mix of Recursion and iterative. As if loop iteself is recursion concept 
+and for loop covers the recursion concept*/
 public class FibonacciExample {
 	public static void main(String [] args){
 	    Scanner console = new Scanner(System.in);

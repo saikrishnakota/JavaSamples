@@ -1,0 +1,399 @@
+class OpsUsersInactivityDetection {
+  static void buildMyJob(def job) {
+    job.with {
+      description('Inactivity Detection of Users')
+      if(InetAddress.localHost.canonicalHostName != "sprint-jenkins01.managed.contegix.com"){
+        disabled(true)
+      }else{
+	    disabled(false)
+	  }
+      logRotator(10, 10, 1, -1)
+      parameters {
+       stringParam('emails', '', 'The email (or emails) you want to send the report. It should be sent to aem_ops@sprint.com. For any issue please create Jira ticket')
+      }
+      triggers {
+        cron("H 10 * * 1-5")
+      }
+      steps{
+        systemGroovyCommand('''
+
+
+import com.cloudbees.plugins.credentials.common.StandardUsernamePasswordCredentials
+import com.cloudbees.plugins.credentials.CredentialsProvider
+import groovy.json.JsonSlurper
+import hudson.model.*
+import groovy.transform.Field
+
+/**
+* Verify if the user is part of the exception list
+*
+* @param CurrentUsername The user you want to verify
+* @return {Boolean} If the user is part of the exception list or not
+*/
+
+public checkExceptions ( String currentUsername, String exceptionListAdministrators, String SystemUser ) {
+    //checking exception condition for administrators and systemuser
+   	return exceptionList.contains(currentUsername) || exceptionListAdministrators.contains(currentUsername) || SystemUser.contains(currentUsername)
+}
+
+public adminExceptions ( String currentUsername, String exceptionListAdministrators ) {
+   	//checking exception condition for administrators
+   	return exceptionListAdministrators.contains(currentUsername)
+}
+
+//GLOBAL VARIABLES
+def serverCredentials
+def creds
+def userName = ""
+def userPass = ""
+def inactiveUsers
+def usersRaw
+def lastAccess
+def lastAccessDate
+def jsonSlurper
+def usersObject
+def exceptionListAdministrators
+def SystemUser
+def userHesaru
+
+newLine = System.getProperty("line.separator")
+
+//Checking if we are in a local environment to avoid running the job (to prevent automatic excecution of the job using cron). Set Variable isProduction to true to run this job locally.
+
+jenkinsInstance = Hudson.instance
+String serverUrl = jenkinsInstance.getRootUrl()
+boolean isProduction = false
+if (serverUrl.indexOf("localhost") == -1) {
+    isProduction = true
+}
+
+//Getting the server login
+creds = com.cloudbees.plugins.credentials.CredentialsProvider.lookupCredentials(
+    com.cloudbees.plugins.credentials.common.StandardUsernamePasswordCredentials.class,
+    jenkins.model.Jenkins.instance
+)
+
+serverCredentials = creds.findResult { it.id == "aem-user-sentry" ? it : null }
+
+if ( serverCredentials && isProduction ) {
+    userName = serverCredentials.username
+    userPass = serverCredentials.password
+
+    def currDate = new Date()
+    def formattedDate = currDate.format("MM/dd/yyy")
+    def formattedTime = currDate.format("hh:mm")
+    def username = ""
+    String resultsHeader = "Inactive Users report as on - $formattedDate"
+    String startTime = "Start time: $formattedTime"
+    out.println "$resultsHeader"
+
+    //Exception List
+    @Field final String[] exceptionList = ["jkramptest", "kfoxtest", "admin", "anonymous", "aembuild", "build-script", "activator", "clientlibsarchiver", "mule-commerce-sync", "syncsystemuser", "usersentry", "tokenListenerSystemUser"] as String[]
+
+
+    //AEM Server List
+    //@Field final String[] aemServerList = ["author-sprint-dev3-63.adobecqms.net", "author-sprint-qa-63.adobecqms.net", "author-sprint-hfx.adobecqms.net", "author-sprint-rtb.adobecqms.net", "author-sprint-stage-63.adobecqms.net", "author-sprint-prod-63.adobecqms.net"] as String[]
+
+    @Field final String[] aemServerList = ["author-sprint-dev1-63.adobecqms.net", "author-sprint-dev3-63.adobecqms.net", "author-sprint-qa-63.adobecqms.net", "author-sprint-hfx.adobecqms.net", "author-sprint-rtb.adobecqms.net", "author-sprint-stage-63.adobecqms.net", "author-sprint-prod-63.adobecqms.net"] as String[]
+
+    @Field final String[] exceptionUserList = ["adminExceptions(userHesaru,exceptionListAdministrators", "!checkExceptions(userHesaru,exceptionListAdministrators"] as String[]
+
+    for ( aemServer in aemServerList ) {
+        switch ( aemServer ) {
+            case "author-sprint-dev1-63.adobecqms.net":
+            aemEnv = 'Dev1-63'
+            daysInactive = 30
+            break
+
+            case "author-sprint-dev3-63.adobecqms.net":
+            aemEnv = 'Dev3-63'
+            daysInactive = 30
+            break
+
+            case "author-sprint-qa-63.adobecqms.net":
+            aemEnv = 'QA-63'
+            daysInactive = 30
+            break
+
+            case "author-sprint-hfx.adobecqms.net":
+            aemEnv = 'Hotfix'
+            daysInactive = 30
+            break
+
+            case "author-sprint-rtb.adobecqms.net":
+            aemEnv = 'RTB'
+            daysInactive = 30
+            break
+
+            case "author-sprint-stage-63.adobecqms.net":
+            aemEnv = 'Stage-63'
+            daysInactive = 30
+            break
+
+            case "author-sprint-prod-63.adobecqms.net":
+            aemEnv = 'Production-63'
+            daysInactive = 30
+            break
+        }
+
+        usersRaw = ["curl", "-X", "POST", "-H", "Content-Type: application/json", "-k", "-u", "${userName}:${userPass}", "--url", "https://${aemServer}/bin/querybuilder.json?1_property=jcr%3aprimaryType&1_property.value=rep%3aUser&p.hits=full&p.limit=-1&p.nodedepth=2&path=%2fhome%2fusers"].execute().text
+
+
+        //Added below lines to put exception for administrators  and System users.
+        exceptionListAdministrators = ["curl", "-s", "-H", "Content-Type: application/json", "-k", "-u",  "${userName}:${userPass}", "--url", "https://${aemServer}/home/groups/a/administrators.rw.json?props=members"].execute().text
+
+        SystemUser = ["curl", "-s", "-H", "Content-Type: application/json", "-k", "-u",  "${userName}:${userPass}", "--url", "https://${aemServer}/bin/querybuilder.json?1_property=rep%3aauthorizableId&p.limit=-1&path=%2fhome%2fusers%2fsystem"].execute().text
+        out.println("")
+        out.println("----------------------------------------------------------------------------------------------------------------------------------")
+
+        if ( !usersRaw.isEmpty() ) {
+            jsonSlurper = new groovy.json.JsonSlurper()
+            usersObject = jsonSlurper.parseText(usersRaw)
+
+	     String var2 = "!checkExceptions(userHesaru,exceptionListAdministrators,SystemUser)"
+            userReport(usersObject,var2,exceptionListAdministrators,SystemUser,aemServer,userName,userPass)
+        }else {
+            out.println("Jenkins cannot access AEM instance, please verify the configuration.")
+        }
+
+    }
+    for ( aemServer in aemServerList ) {
+        switch ( aemServer ) {
+            case "author-sprint-dev1-63.adobecqms.net":
+            aemEnv = 'Dev1-63'
+            daysInactive = 30
+            break
+
+            case "author-sprint-dev3-63.adobecqms.net":
+            aemEnv = 'Dev3-63'
+            daysInactive = 30
+            break
+
+            case "author-sprint-qa-63.adobecqms.net":
+            aemEnv = 'QA-63'
+            daysInactive = 30
+            break
+
+            case "author-sprint-hfx.adobecqms.net":
+            aemEnv = 'Hotfix'
+            daysInactive = 30
+            break
+
+            case "author-sprint-rtb.adobecqms.net":
+            aemEnv = 'RTB'
+            daysInactive = 30
+            break
+
+            case "author-sprint-stage-63.adobecqms.net":
+            aemEnv = 'Stage-63'
+            daysInactive = 30
+            break
+
+            case "author-sprint-prod-63.adobecqms.net":
+            aemEnv = 'Production-63'
+            daysInactive = 30
+            break
+        }
+
+        usersRaw = ["curl", "-X", "POST", "-H", "Content-Type: application/json", "-k", "-u", "${userName}:${userPass}", "--url", "https://${aemServer}/bin/querybuilder.json?1_property=jcr%3aprimaryType&1_property.value=rep%3aUser&p.hits=full&p.limit=-1&p.nodedepth=2&path=%2fhome%2fusers"].execute().text
+
+
+        //Added below lines to put exception for administrators  and System users.
+        exceptionListAdministrators = ["curl", "-s", "-H", "Content-Type: application/json", "-k", "-u",  "${userName}:${userPass}", "--url", "https://${aemServer}/home/groups/a/administrators.rw.json?props=members"].execute().text
+
+        SystemUser = ["curl", "-s", "-H", "Content-Type: application/json", "-k", "-u",  "${userName}:${userPass}", "--url", "https://${aemServer}/bin/querybuilder.json?1_property=rep%3aauthorizableId&p.limit=-1&path=%2fhome%2fusers%2fsystem"].execute().text
+        out.println("")
+        out.println("----------------------------------------------------------------------------------------------------------------------------------")
+
+        if ( !usersRaw.isEmpty() ) {
+            jsonSlurper = new groovy.json.JsonSlurper()
+            usersObject = jsonSlurper.parseText(usersRaw)
+		String var1 = "adminExceptions(userHesaru,exceptionListAdministrators)"
+            adminReport(usersObject,var1,exceptionListAdministrators)
+        }else {
+            out.println("Jenkins cannot access AEM instance, please verify the configuration.")
+        }
+
+    }
+    currDate = new Date()
+    formattedTime = currDate.format("hh:mm")
+    out.println("")
+    out.println("--------------------------------------------------")
+    out.println("Start and End time of the Job:")
+    out.println "$startTime"
+    out.println "End time: $formattedTime"
+    out.println("--------------------------------------------------")
+    out.println("")
+} else {
+    if ( serverCredentials ) {
+        throw new Exception("Error. Please make sure that you are not running this job in a local environment.")
+    } else {
+        throw new Exception("Error. Check in Jenkins that credentials with id \\\"aem-user-sentry\\\" exist.")
+    }
+
+}
+
+
+def adminReport(Object usersObject, String excepetion, Object exceptionListAdministrators){
+
+    if ( excepetion.equals("adminExceptions(userHesaru,exceptionListAdministrators)")){
+        out.println("Inactive Administrator users on ${aemEnv} Environment:")
+        out.println("----------------------------------------------------------------------------------------------------------------------------------")
+        out.print("Users".padRight(15))
+        out.print("   ")
+        out.print("FullName".padRight(30))
+        out.print("   ")
+        out.print("Email ID".padRight(40))
+        out.print("   ")
+        out.println("last_Accessed")
+        out.println("----------------------------------------------------------------------------------------------------------------------------------")
+
+        for ( user12 in usersObject.hits ) {
+            userHesaru=user12["rep:authorizableId"]
+            if ( adminExceptions(userHesaru,exceptionListAdministrators) ) {
+                if ( !user12["rep:disabled"].equals("inactive") && user12["last-login"] ) {
+                    lastAccess=user12["last-login"]
+                    lad = new Date(lastAccess["logged"])
+                    todayDate = new Date()
+                    diff = todayDate.minus(lad)
+                    fullName=(user12.profile.givenName + " " + user12.profile.familyName)
+
+                    if ( diff >= daysInactive){
+                        user1=user12["rep:authorizableId"]
+                        email=user12.profile.email
+                        if ( user1.equals(null) ){
+                            out.print("null".padRight(15))
+                        }else{
+                            out.print(user1.padRight(15))
+                        }
+                        print(" | ")
+                        if (fullName.equals(null)){
+                            out.print("null".padRight(40))
+                        }else{
+                            out.print(fullName.padRight(30))
+                        }
+                        print(" | ")
+                        if (email.equals(null)){
+                            out.print("null".padRight(40))
+                        }else{
+                            out.print(email.padRight(40))
+                        }
+                        print(" | ")
+                        if ( lad.equals(null) ){
+                            out.println("null".padRight(40))
+                        }else{
+                      		out.println(lad)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+}
+
+def userReport(Object usersObject, String excepetion, Object exceptionListAdministrators,Object SystemUser,String aemServer, def userName, def userPass){
+    out.println("Inactive users on ${aemEnv} Environment:")
+    out.println("----------------------------------------------------------------------------------------------------------------------------------")
+    out.print("Users".padRight(15))
+    out.print("   ")
+    out.print("FullName".padRight(30))
+    out.print("   ")
+    out.print("Email ID".padRight(40))
+    out.print("   ")
+    out.print("last_Accessed")
+    out.print("   ")
+    out.println("Status")
+
+    out.println("----------------------------------------------------------------------------------------------------------------------------------")
+
+    for ( user12 in usersObject.hits ) {
+        userHesaru=user12["rep:authorizableId"]
+        if ( !checkExceptions(userHesaru,exceptionListAdministrators,SystemUser) ) {
+            if ( !user12["rep:disabled"].equals("inactive") && user12["last-login"] ) {
+                lastAccess=user12["last-login"]
+                lad = new Date(lastAccess["logged"])
+                todayDate = new Date()
+                diff = todayDate.minus(lad)
+                fullName=(user12.profile.givenName + " " + user12.profile.familyName)
+                if ( diff >= daysInactive){
+                	userPath = user12["jcr:path"]
+
+                  	//def response = "curl -s -k -u ${userName}:${userPass} -FdeleteAuthorizable= https://${aemServer}${userPath}".execute()
+                    def response = "curl -X POST -s -k -u ${userName}:${userPass} -FdisableUser=inactive https://${aemServer}${userPath}.rw.html".execute()
+                    def output = new StringBuffer()
+            def error = new StringBuffer()
+            response.consumeProcessOutput( output, error )
+            response.waitFor()
+            if( output.size() > 0 ) {
+
+                    user1=user12["rep:authorizableId"]
+                    email=user12.profile.email
+                    user1=user12["rep:authorizableId"]
+                    email=user12.profile.email
+                    if ( user1.equals(null) ){
+                        out.print("null".padRight(15))
+                    }else{
+                        out.print(user1.padRight(15))
+                    }
+                    print(" | ")
+                    if (fullName.equals(null)){
+                        out.print("null".padRight(40))
+                    }else{
+                        out.print(fullName.padRight(30))
+                    }
+                    print(" | ")
+                    if (email.equals(null)){
+                        out.print("null".padRight(40))
+                    }else{
+                        out.print(email.padRight(40))
+                    }
+                    print(" | ")
+                    if ( lad.equals(null) ){
+                        out.print("null".padRight(40))
+                    }else{
+                        out.print(lad)
+                    }
+                    out.print(" | ")
+                    out.println("Disabled")
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+    ''')
+      }
+      publishers {
+        extendedEmail {
+          recipientList('aem_ops@sprint.com, ${emails}')
+          defaultSubject('Report - Inactive users - Build #${BUILD_ID}')
+          defaultContent('Hello!<br />Below you\'ll find the results of the script to check the list of inactive users.<br /><br /><pre>${BUILD_LOG, maxLines=9999, escapeHtml=false}</pre><br />Regards!')
+          contentType('text/html')
+          attachBuildLog(false)
+          preSendScript("String encodingOptions = 'text/html; charset=UTF-8;';\n String contentToSet = ((javax.mail.Multipart)msg.getContent()).getBodyPart(0).getContent().toString();\n contentToSet = contentToSet.replace('No emails were triggered.', '');\n contentToSet = contentToSet.replace('Email was triggered for: Success', '');\n contentToSet = contentToSet.replace('Sending email for trigger: Success', '');\n msg.setContent(contentToSet , encodingOptions);")
+          triggers {
+              success{
+                  subject('Report - Inactive users - Build #${BUILD_ID}')
+                  content('Hello!<br />Below you\'ll find the results of the script to check the list of inactive users.<br /><br /><pre>${BUILD_LOG, maxLines=9999, escapeHtml=false}</pre><br />Regards!')
+                  sendTo {
+                recipientList()
+                       }
+            }
+              stillUnstable {
+              subject('Subject')
+              content('Body')
+              sendTo {
+                culprits()
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+           
